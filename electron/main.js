@@ -5,6 +5,7 @@ const os = require('os')
 const pty = require('node-pty')
 
 let mainWindow
+let isQuitting = false
 
 const CLAUDE_DIR = path.join(os.homedir(), '.claude')
 const PROJECTS_DIR = path.join(CLAUDE_DIR, 'projects')
@@ -46,6 +47,13 @@ function createWindow() {
     if (isDev) mainWindow.webContents.openDevTools()
   }
 
+  mainWindow.on('close', (event) => {
+    if (!isQuitting) {
+      event.preventDefault()
+      mainWindow.webContents.send('ask-save-memory')
+    }
+  })
+
   mainWindow.on('closed', () => {
     // Clean up PTY
     const ptyProcess = ptyProcesses.get(mainWindow.id)
@@ -56,6 +64,35 @@ function createWindow() {
     mainWindow = null
   })
 }
+
+// Quit confirmation from renderer
+ipcMain.handle('confirm-quit', async (event, { save, memoryData }) => {
+  if (save && memoryData) {
+    try {
+      const memoryPath = path.join(memoryData.cwd, '.claude', 'memory.md')
+      const dir = path.dirname(memoryPath)
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+      fs.writeFileSync(memoryPath, memoryData.content, 'utf8')
+
+      // Also update CLAUDE.md with memory section
+      const claudeMdPath = path.join(memoryData.cwd, 'CLAUDE.md')
+      if (fs.existsSync(claudeMdPath)) {
+        let claudeMd = fs.readFileSync(claudeMdPath, 'utf8')
+        const memorySection = `\n\n<!-- DYNAMIC_MEMORY_START -->\n# 对话记忆\n\n${memoryData.content}\n<!-- DYNAMIC_MEMORY_END -->`
+        if (claudeMd.includes('<!-- DYNAMIC_MEMORY_START -->')) {
+          claudeMd = claudeMd.replace(/<!-- DYNAMIC_MEMORY_START -->[\s\S]*?<!-- DYNAMIC_MEMORY_END -->/, memorySection)
+        } else {
+          claudeMd += memorySection
+        }
+        fs.writeFileSync(claudeMdPath, claudeMd, 'utf8')
+      }
+    } catch (err) {
+      console.error('Save memory failed:', err)
+    }
+  }
+  isQuitting = true
+  app.quit()
+})
 
 // ===================== PTY IPC =====================
 
@@ -348,6 +385,266 @@ ipcMain.handle('get-env-info', async () => {
     platform: process.platform,
     homedir: os.homedir(),
     claudeDir: CLAUDE_DIR
+  }
+})
+
+// ===================== Memory System =====================
+
+ipcMain.handle('get-project-memory', async (event, cwd) => {
+  try {
+    if (!cwd) return { content: '' }
+    const memoryPath = path.join(cwd, '.claude', 'memory.md')
+    if (!fs.existsSync(memoryPath)) return { content: '' }
+    const content = fs.readFileSync(memoryPath, 'utf8')
+    return { content }
+  } catch (err) {
+    return { error: err.message }
+  }
+})
+
+ipcMain.handle('save-project-memory', async (event, { cwd, content }) => {
+  try {
+    if (!cwd) return { error: 'No cwd provided' }
+    const memoryPath = path.join(cwd, '.claude', 'memory.md')
+    const dir = path.dirname(memoryPath)
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(memoryPath, content, 'utf8')
+
+    // Update CLAUDE.md
+    const claudeMdPath = path.join(cwd, 'CLAUDE.md')
+    if (fs.existsSync(claudeMdPath)) {
+      let claudeMd = fs.readFileSync(claudeMdPath, 'utf8')
+      const memorySection = `\n\n<!-- DYNAMIC_MEMORY_START -->\n# 对话记忆\n\n${content}\n<!-- DYNAMIC_MEMORY_END -->`
+      if (claudeMd.includes('<!-- DYNAMIC_MEMORY_START -->')) {
+        claudeMd = claudeMd.replace(/<!-- DYNAMIC_MEMORY_START -->[\s\S]*?<!-- DYNAMIC_MEMORY_END -->/, memorySection)
+      } else {
+        claudeMd += memorySection
+      }
+      fs.writeFileSync(claudeMdPath, claudeMd, 'utf8')
+    }
+
+    return { success: true }
+  } catch (err) {
+    return { error: err.message }
+  }
+})
+
+ipcMain.handle('generate-memory', async (event, { cwd, projectName }) => {
+  try {
+    if (!cwd) return { content: '' }
+
+    // Find the project in ~/.claude/projects/ matching cwd
+    const projectsDir = path.join(CLAUDE_DIR, 'projects')
+    let targetJsonl = null
+
+    if (fs.existsSync(projectsDir)) {
+      const dirs = fs.readdirSync(projectsDir, { withFileTypes: true }).filter(d => d.isDirectory())
+      for (const d of dirs) {
+        const projectPath = path.join(projectsDir, d.name)
+        const files = fs.readdirSync(projectPath).filter(f => f.endsWith('.jsonl'))
+        if (files.length === 0) continue
+
+        // Check if cwd matches
+        let foundCwd = null
+        try {
+          const content = fs.readFileSync(path.join(projectPath, files[0]), 'utf8')
+          const lines = content.split('\n').filter(Boolean)
+          for (let i = 0; i < Math.min(lines.length, 30); i++) {
+            try {
+              const msg = JSON.parse(lines[i])
+              if (msg.cwd) { foundCwd = msg.cwd; break }
+              if (msg.workspace) { foundCwd = msg.workspace; break }
+            } catch { }
+          }
+        } catch { }
+
+        if (foundCwd === cwd) {
+          targetJsonl = path.join(projectPath, files.sort((a, b) => {
+            const sa = fs.statSync(path.join(projectPath, a))
+            const sb = fs.statSync(path.join(projectPath, b))
+            return sb.mtime - sa.mtime
+          })[0])
+          break
+        }
+      }
+    }
+
+    // Fallback: try to find by project name or recent file
+    if (!targetJsonl && projectName) {
+      const fallbackPath = path.join(projectsDir, projectName)
+      if (fs.existsSync(fallbackPath)) {
+        const files = fs.readdirSync(fallbackPath).filter(f => f.endsWith('.jsonl'))
+        if (files.length > 0) {
+          targetJsonl = path.join(fallbackPath, files.sort((a, b) => {
+            const sa = fs.statSync(path.join(fallbackPath, a))
+            const sb = fs.statSync(path.join(fallbackPath, b))
+            return sb.mtime - sa.mtime
+          })[0])
+        }
+      }
+    }
+
+    if (!targetJsonl || !fs.existsSync(targetJsonl)) {
+      return { content: '# 对话记忆\n\n暂无对话记录。' }
+    }
+
+    // Read all messages
+    const content = fs.readFileSync(targetJsonl, 'utf8')
+    const lines = content.split('\n').filter(Boolean)
+    const messages = lines.map(line => {
+      try { return JSON.parse(line) } catch { return null }
+    }).filter(Boolean)
+
+    // Generate summary
+    const userMessages = messages.filter(m => m.type === 'user')
+    const assistantMessages = messages.filter(m => m.type === 'assistant')
+
+    let memory = `# 对话记忆\n\n`
+    memory += `**生成时间**: ${new Date().toLocaleString()}\n\n`
+
+    // Extract preferences from user messages
+    const preferences = extractPreferences(userMessages)
+    if (preferences.length > 0) {
+      memory += `## 用户偏好与性格\n\n`
+      preferences.forEach(p => {
+        memory += `- ${p}\n`
+      })
+      memory += `\n`
+    }
+
+    // Project progress
+    const progress = extractProgress(messages)
+    if (progress.length > 0) {
+      memory += `## 项目进度\n\n`
+      progress.forEach(p => {
+        memory += `- ${p}\n`
+      })
+      memory += `\n`
+    }
+
+    // Decisions
+    const decisions = extractDecisions(messages)
+    if (decisions.length > 0) {
+      memory += `## 重要决策\n\n`
+      decisions.forEach(d => {
+        memory += `- ${d}\n`
+      })
+      memory += `\n`
+    }
+
+    // Full conversation summary (last 50 exchanges)
+    memory += `## 完整对话摘要\n\n`
+    const recentMessages = messages.slice(-100)
+    recentMessages.forEach(m => {
+      const role = m.type === 'user' ? '**用户**' : '**Claude**'
+      const text = typeof m.message?.content === 'string'
+        ? m.message.content
+        : typeof m.content === 'string'
+          ? m.content
+          : JSON.stringify(m.message?.content || m.content || '').slice(0, 500)
+      if (text && text.trim()) {
+        memory += `${role}: ${text.slice(0, 300)}${text.length > 300 ? '...' : ''}\n\n`
+      }
+    })
+
+    return { content: memory }
+  } catch (err) {
+    return { error: err.message }
+  }
+})
+
+function extractPreferences(messages) {
+  const prefs = []
+  const prefKeywords = ['喜欢', '希望', '想要', '不要', '偏好', '习惯', '风格', '审美', '界面', '颜色', '布局', '字体']
+  messages.forEach(m => {
+    const text = typeof m.message?.content === 'string' ? m.message.content : typeof m.content === 'string' ? m.content : ''
+    if (typeof text === 'string') {
+      prefKeywords.forEach(kw => {
+        if (text.includes(kw) && text.length < 500) {
+          const sentence = text.split(/[。！？\n]/).find(s => s.includes(kw))
+          if (sentence && !prefs.includes(sentence.trim())) {
+            prefs.push(sentence.trim())
+          }
+        }
+      })
+    }
+  })
+  return prefs.slice(0, 20)
+}
+
+function extractProgress(messages) {
+  const progress = []
+  const progressKeywords = ['完成', '做完', '实现', '添加', '修改', '删除', '更新', '修复', '优化', '重构']
+  messages.forEach(m => {
+    const text = typeof m.message?.content === 'string' ? m.message.content : typeof m.content === 'string' ? m.content : ''
+    if (typeof text === 'string') {
+      progressKeywords.forEach(kw => {
+        if (text.includes(kw) && text.length < 500) {
+          const sentence = text.split(/[。！？\n]/).find(s => s.includes(kw))
+          if (sentence && !progress.includes(sentence.trim())) {
+            progress.push(sentence.trim())
+          }
+        }
+      })
+    }
+  })
+  return progress.slice(0, 20)
+}
+
+function extractDecisions(messages) {
+  const decisions = []
+  const decisionKeywords = ['决定', '选择', '采用', '使用', '确定', '定为', '定为', '方案']
+  messages.forEach(m => {
+    const text = typeof m.message?.content === 'string' ? m.message.content : typeof m.content === 'string' ? m.content : ''
+    if (typeof text === 'string') {
+      decisionKeywords.forEach(kw => {
+        if (text.includes(kw) && text.length < 500) {
+          const sentence = text.split(/[。！？\n]/).find(s => s.includes(kw))
+          if (sentence && !decisions.includes(sentence.trim())) {
+            decisions.push(sentence.trim())
+          }
+        }
+      })
+    }
+  })
+  return decisions.slice(0, 20)
+}
+
+ipcMain.handle('get-all-memories', async () => {
+  try {
+    const projectsDir = path.join(CLAUDE_DIR, 'projects')
+    if (!fs.existsSync(projectsDir)) return { memories: [] }
+
+    const memories = []
+    const dirs = fs.readdirSync(projectsDir, { withFileTypes: true }).filter(d => d.isDirectory())
+
+    for (const d of dirs) {
+      const memoryPath = path.join(projectsDir, d.name, '.claude', 'memory.md')
+      if (fs.existsSync(memoryPath)) {
+        const content = fs.readFileSync(memoryPath, 'utf8')
+        const firstLine = content.split('\n')[0] || ''
+        memories.push({
+          projectName: d.name,
+          path: memoryPath,
+          preview: firstLine.slice(0, 100),
+          hasMemory: content.length > 50
+        })
+      }
+    }
+
+    return { memories }
+  } catch (err) {
+    return { error: err.message }
+  }
+})
+
+ipcMain.handle('load-other-memory', async (event, memoryPath) => {
+  try {
+    if (!fs.existsSync(memoryPath)) return { content: '' }
+    const content = fs.readFileSync(memoryPath, 'utf8')
+    return { content }
+  } catch (err) {
+    return { error: err.message }
   }
 })
 

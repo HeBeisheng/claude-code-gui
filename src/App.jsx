@@ -3,6 +3,7 @@ import TerminalPanel from './components/TerminalPanel'
 import SkillsPanel from './components/SkillsPanel'
 import SettingsPanel from './components/SettingsPanel'
 import FeatureMap from './components/FeatureMap'
+import MemoryPanel from './components/MemoryPanel'
 
 function timeAgo(date) {
   if (!date) return ''
@@ -23,9 +24,19 @@ function App() {
   const [projects, setProjects] = useState([])
   const [selectedProjectName, setSelectedProjectName] = useState(null)
   const [isLoading, setIsLoading] = useState(false)
+  const [showQuitDialog, setShowQuitDialog] = useState(false)
+  const [memoryContent, setMemoryContent] = useState('')
+  const [isGeneratingMemory, setIsGeneratingMemory] = useState(false)
 
   useEffect(() => {
     loadProjects()
+
+    // Listen for quit confirmation from main process
+    const cleanup = window.electronAPI.onAskSaveMemory(() => {
+      setShowQuitDialog(true)
+    })
+
+    return () => cleanup()
   }, [])
 
   const loadProjects = async () => {
@@ -72,8 +83,47 @@ function App() {
     handleSendCommand('claude')
   }
 
+  const handleQuitSave = async () => {
+    setIsGeneratingMemory(true)
+    const data = await window.electronAPI.generateMemory({ cwd: activeCwd, projectName: selectedProjectName })
+    setIsGeneratingMemory(false)
+    if (data.content) {
+      await window.electronAPI.confirmQuit({ save: true, memoryData: { cwd: activeCwd, content: data.content } })
+    } else {
+      await window.electronAPI.confirmQuit({ save: false })
+    }
+  }
+
+  const handleQuitWithoutSave = async () => {
+    await window.electronAPI.confirmQuit({ save: false })
+  }
+
+  const handleQuitCancel = () => {
+    setShowQuitDialog(false)
+  }
+
   return (
     <div className="app">
+      {/* Quit Dialog */}
+      {showQuitDialog && (
+        <div className="modal-overlay">
+          <div className="modal-dialog">
+            <div className="modal-title">保存对话记忆？</div>
+            <div className="modal-body">
+              退出前保存本次对话的记忆，下次打开时新 AI 能知道你是谁、做到哪了。
+              {isGeneratingMemory && <div style={{ marginTop: '12px', color: '#888' }}>正在生成记忆...</div>}
+            </div>
+            <div className="modal-actions">
+              <button className="btn-secondary btn" onClick={handleQuitCancel}>取消</button>
+              <button className="btn-secondary btn" onClick={handleQuitWithoutSave}>不保存</button>
+              <button className="btn-primary btn" onClick={handleQuitSave} disabled={isGeneratingMemory}>
+                {isGeneratingMemory ? '生成中...' : '保存并退出'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Sidebar */}
       <div className="sidebar">
         <div className="sidebar-header">
@@ -129,6 +179,12 @@ function App() {
             <span>◆</span> 技能开关
           </div>
           <div
+            className={`sidebar-footer-item ${activeView === 'memory' ? 'active' : ''}`}
+            onClick={() => setActiveView('memory')}
+          >
+            <span>📝</span> 记忆
+          </div>
+          <div
             className={`sidebar-footer-item ${activeView === 'settings' ? 'active' : ''}`}
             onClick={() => setActiveView('settings')}
           >
@@ -161,6 +217,16 @@ function App() {
               <button className="btn-back" onClick={() => setActiveView('terminal')}>← 返回终端</button>
             </div>
             <SkillsPanel />
+          </div>
+        )}
+
+        {activeView === 'memory' && (
+          <div className="panel-wrapper">
+            <div className="panel-header">
+              <h1 className="panel-title">对话记忆</h1>
+              <button className="btn-back" onClick={() => setActiveView('terminal')}>← 返回终端</button>
+            </div>
+            <MemoryPanel cwd={activeCwd} projectName={selectedProjectName} />
           </div>
         )}
 
