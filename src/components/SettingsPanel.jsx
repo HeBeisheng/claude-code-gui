@@ -1,0 +1,127 @@
+import React, { useEffect, useState } from 'react'
+
+function SettingsPanel() {
+  const [settings, setSettings] = useState({})
+  const [activeScope, setActiveScope] = useState('globalLocal')
+  const [jsonText, setJsonText] = useState('')
+  const [saveStatus, setSaveStatus] = useState('')
+
+  useEffect(() => {
+    if (window.electronAPI) {
+      window.electronAPI.getSettings().then(data => {
+        setSettings(data)
+        const initial = data[activeScope]
+        setJsonText(initial ? JSON.stringify(initial, null, 2) : '{}')
+      })
+    }
+  }, [])
+
+  useEffect(() => {
+    const scopeData = settings[activeScope]
+    setJsonText(scopeData ? JSON.stringify(scopeData, null, 2) : '{}')
+    setSaveStatus('')
+  }, [activeScope])
+
+  const handleSave = async () => {
+    try {
+      const data = JSON.parse(jsonText)
+      const result = await window.electronAPI.saveSettings({ scope: activeScope, data })
+      if (result.success) {
+        setSaveStatus('保存成功')
+        setSettings(prev => ({ ...prev, [activeScope]: data }))
+      } else {
+        setSaveStatus('保存失败: ' + result.error)
+      }
+    } catch (err) {
+      setSaveStatus('JSON 格式错误')
+    }
+  }
+
+  const scopes = [
+    { key: 'global', label: '全局', path: '~/.claude/settings.json' },
+    { key: 'globalLocal', label: '全局本地', path: '~/.claude/settings.local.json' },
+    { key: 'project', label: '项目', path: '.claude/settings.json' },
+    { key: 'projectLocal', label: '项目本地', path: '.claude/settings.local.json' }
+  ]
+
+  const configHelp = [
+    { key: 'permissions.allow', type: '数组', desc: '权限白名单规则列表' },
+    { key: 'permissions.defaultMode', type: '字符串', desc: '默认权限模式：default / auto / acceptEdits / bypassPermissions / dontAsk / plan' },
+    { key: 'model', type: '字符串', desc: '默认使用的 AI 模型' },
+    { key: 'theme', type: '字符串', desc: '界面主题：auto / dark / light' },
+    { key: 'editorMode', type: '字符串', desc: '编辑器模式：normal / vim' },
+    { key: 'verbose', type: '布尔', desc: '显示完整的工具调用输出' },
+    { key: 'autoCompactEnabled', type: '布尔', desc: '自动压缩过长的对话上下文' },
+    { key: 'fileCheckpointingEnabled', type: '布尔', desc: '编辑文件前自动创建备份快照' },
+    { key: 'enableAllProjectMcpServers', type: '布尔', desc: '自动启用项目内所有 MCP 服务器' },
+    { key: 'enabledMcpjsonServers', type: '数组', desc: '显式启用的 MCP 服务器名称列表' }
+  ]
+
+  return (
+    <div>
+      <h1 className="panel-title">设置编辑器</h1>
+      <p className="panel-subtitle">直接编辑 Claude Code 的四层配置文件</p>
+
+      <div className="scope-tabs">
+        {scopes.map(s => (
+          <button
+            key={s.key}
+            className={`scope-tab ${activeScope === s.key ? 'active' : ''}`}
+            onClick={() => setActiveScope(s.key)}
+          >
+            {s.label}
+          </button>
+        ))}
+      </div>
+
+      <div style={{ marginBottom: '12px', fontSize: '12px', color: '#666' }}>
+        当前文件: <code>{scopes.find(s => s.key === activeScope)?.path}</code>
+      </div>
+
+      <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '16px 20px', borderBottom: '1px solid #1c1c1c' }}>
+          <span style={{ fontSize: '13px', color: '#888', fontWeight: 500 }}>JSON 编辑器</span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+            {saveStatus && (
+              <span className={saveStatus === '保存成功' ? 'status-success' : 'status-error'} style={{ fontSize: '13px', fontWeight: 500 }}>
+                {saveStatus}
+              </span>
+            )}
+            <button className="btn btn-primary" onClick={handleSave}>保存更改</button>
+          </div>
+        </div>
+        <textarea
+          className="form-textarea"
+          style={{ borderRadius: 0, border: 'none', minHeight: '360px' }}
+          value={jsonText}
+          onChange={e => { setJsonText(e.target.value); setSaveStatus('') }}
+          spellCheck={false}
+        />
+      </div>
+
+      <div className="card">
+        <div className="card-title">常用配置项参考</div>
+        <table className="table">
+          <thead>
+            <tr>
+              <th>配置项</th>
+              <th>类型</th>
+              <th>说明</th>
+            </tr>
+          </thead>
+          <tbody>
+            {configHelp.map(item => (
+              <tr key={item.key}>
+                <td><code>{item.key}</code></td>
+                <td><span className="tag tag-blue">{item.type}</span></td>
+                <td style={{ color: '#888' }}>{item.desc}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
+export default SettingsPanel
