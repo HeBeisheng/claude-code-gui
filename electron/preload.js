@@ -6,7 +6,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveSettings: (payload) => ipcRenderer.invoke('save-settings', payload),
 
   // Skills
-  getSkills: () => ipcRenderer.invoke('get-skills'),
+  getSkills: (payload) => ipcRenderer.invoke('get-skills', payload),
   toggleSkill: (payload) => ipcRenderer.invoke('toggle-skill', payload),
 
   // MCP
@@ -15,12 +15,52 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Transcripts / History
   getTranscripts: () => ipcRenderer.invoke('get-transcripts'),
   getTranscriptContent: (filePath) => ipcRenderer.invoke('get-transcript-content', filePath),
+  saveProjectAlias: (payload) => ipcRenderer.invoke('save-project-alias', payload),
+  saveSession: (payload) => ipcRenderer.invoke('save-session', payload),
 
   // Directory
   selectDirectory: () => ipcRenderer.invoke('select-directory'),
 
   // Env
   getEnvInfo: () => ipcRenderer.invoke('get-env-info'),
+
+  // Build & Package
+  buildApp: () => ipcRenderer.invoke('build-app'),
+  openReleaseFolder: () => ipcRenderer.invoke('open-release-folder'),
+  onBuildOutput: (callback) => {
+    const handler = (event, data) => callback(data)
+    ipcRenderer.on('build-output', handler)
+    return () => ipcRenderer.removeListener('build-output', handler)
+  },
+  onBuildDone: (callback) => {
+    const handler = (event, data) => callback(data)
+    ipcRenderer.on('build-done', handler)
+    return () => ipcRenderer.removeListener('build-done', handler)
+  },
+
+  // Auto Update
+  checkForUpdate: () => ipcRenderer.invoke('check-for-update'),
+  quitAndInstall: () => ipcRenderer.invoke('quit-and-install'),
+  onUpdateAvailable: (callback) => {
+    const handler = (event, data) => callback(data)
+    ipcRenderer.on('update-available', handler)
+    return () => ipcRenderer.removeListener('update-available', handler)
+  },
+  onUpdateProgress: (callback) => {
+    const handler = (event, data) => callback(data)
+    ipcRenderer.on('update-progress', handler)
+    return () => ipcRenderer.removeListener('update-progress', handler)
+  },
+  onUpdateDownloaded: (callback) => {
+    const handler = (event, data) => callback(data)
+    ipcRenderer.on('update-downloaded', handler)
+    return () => ipcRenderer.removeListener('update-downloaded', handler)
+  },
+  onUpdateError: (callback) => {
+    const handler = (event, data) => callback(data)
+    ipcRenderer.on('update-error', handler)
+    return () => ipcRenderer.removeListener('update-error', handler)
+  },
 
   // PTY Terminal
   ptyCreate: (payload) => ipcRenderer.invoke('pty-create', payload),

@@ -1,8 +1,10 @@
-const { app, BrowserWindow, ipcMain, dialog } = require('electron')
+const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron')
 const path = require('path')
 const fs = require('fs')
 const os = require('os')
+const { spawn } = require('child_process')
 const pty = require('node-pty')
+const { autoUpdater } = require('electron-updater')
 
 let mainWindow
 let isQuitting = false
@@ -123,16 +125,21 @@ ipcMain.handle('pty-create', async (event, { cwd, shell } = {}) => {
     ptyProcesses.set(win.id, ptyProcess)
 
     ptyProcess.onData((data) => {
-      if (!win.isDestroyed()) {
+      // 只有当前窗口的活跃 PTY 仍是本进程时才发送数据，避免旧 PTY 的数据干扰新终端
+      if (ptyProcesses.get(win.id) === ptyProcess && !win.isDestroyed()) {
         win.webContents.send('pty-data', data)
       }
     })
 
     ptyProcess.onExit(({ exitCode, signal }) => {
-      if (!win.isDestroyed()) {
-        win.webContents.send('pty-exit', { exitCode, signal })
+      // 只有当前窗口的活跃 PTY 仍是本进程时才通知 renderer 并清理，
+      // 防止旧 PTY 被替换后的退出事件误杀新终端
+      if (ptyProcesses.get(win.id) === ptyProcess) {
+        if (!win.isDestroyed()) {
+          win.webContents.send('pty-exit', { exitCode, signal })
+        }
+        ptyProcesses.delete(win.id)
       }
-      ptyProcesses.delete(win.id)
     })
 
     return { success: true, pid: ptyProcess.pid }
@@ -219,12 +226,13 @@ ipcMain.handle('save-settings', async (event, { scope, data }) => {
   }
 })
 
-ipcMain.handle('get-skills', async () => {
+ipcMain.handle('get-skills', async (event, { cwd } = {}) => {
   try {
     const userSkillsDir = path.join(CLAUDE_DIR, 'skills')
     const userDisabledDir = path.join(CLAUDE_DIR, 'skills-disabled')
-    const projectSkillsDir = path.join(process.cwd(), '.claude', 'skills')
-    const projectDisabledDir = path.join(process.cwd(), '.claude', 'skills-disabled')
+    const projectDir = cwd || process.cwd()
+    const projectSkillsDir = path.join(projectDir, '.claude', 'skills')
+    const projectDisabledDir = path.join(projectDir, '.claude', 'skills-disabled')
 
     const scanDir = (dir, disabledDir) => {
       const enabled = []
@@ -267,9 +275,9 @@ ipcMain.handle('get-skills', async () => {
   }
 })
 
-ipcMain.handle('toggle-skill', async (event, { scope, name, enable }) => {
+ipcMain.handle('toggle-skill', async (event, { scope, name, enable, cwd }) => {
   try {
-    const baseDir = scope === 'user' ? CLAUDE_DIR : path.join(process.cwd(), '.claude')
+    const baseDir = scope === 'user' ? CLAUDE_DIR : path.join(cwd || process.cwd(), '.claude')
     const srcDir = enable ? path.join(baseDir, 'skills-disabled') : path.join(baseDir, 'skills')
     const destDir = enable ? path.join(baseDir, 'skills') : path.join(baseDir, 'skills-disabled')
 
@@ -296,59 +304,180 @@ ipcMain.handle('get-mcp-servers', async () => {
   }
 })
 
+const ALIASES_PATH = path.join(CLAUDE_DIR, 'project-aliases.json')
+const SESSIONS_PATH = path.join(CLAUDE_DIR, 'ccm-sessions.json')
+
+function getAliases() {
+  try {
+    if (!fs.existsSync(ALIASES_PATH)) return {}
+    return JSON.parse(fs.readFileSync(ALIASES_PATH, 'utf8'))
+  } catch {
+    return {}
+  }
+}
+
+function saveAliases(aliases) {
+  try {
+    fs.writeFileSync(ALIASES_PATH, JSON.stringify(aliases, null, 2), 'utf8')
+    return true
+  } catch {
+    return false
+  }
+}
+
+function getSessions() {
+  try {
+    if (!fs.existsSync(SESSIONS_PATH)) return []
+    return JSON.parse(fs.readFileSync(SESSIONS_PATH, 'utf8'))
+  } catch {
+    return []
+  }
+}
+
+function saveSessions(sessions) {
+  try {
+    fs.writeFileSync(SESSIONS_PATH, JSON.stringify(sessions, null, 2), 'utf8')
+    return true
+  } catch {
+    return false
+  }
+}
+
 ipcMain.handle('get-transcripts', async () => {
   try {
     const projectsDir = path.join(CLAUDE_DIR, 'projects')
-    if (!fs.existsSync(projectsDir)) return { projects: [] }
+    const aliases = getAliases()
+    const sessions = getSessions()
 
-    const projects = fs.readdirSync(projectsDir, { withFileTypes: true })
-      .filter(d => d.isDirectory())
-      .map(d => {
-        const projectPath = path.join(projectsDir, d.name)
-        const files = fs.readdirSync(projectPath)
-          .filter(f => f.endsWith('.jsonl'))
-          .map(f => {
-            const stat = fs.statSync(path.join(projectPath, f))
-            return { name: f, path: path.join(projectPath, f), size: stat.size, mtime: stat.mtime }
-          })
-          .sort((a, b) => b.mtime - a.mtime)
+    let projects = []
 
-        // Extract cwd and preview from the most recent file
-        let preview = ''
-        let cwd = null
-        if (files.length > 0) {
-          try {
-            const content = fs.readFileSync(files[0].path, 'utf8')
-            const lines = content.split('\n').filter(Boolean)
+    if (fs.existsSync(projectsDir)) {
+      const scanned = fs.readdirSync(projectsDir, { withFileTypes: true })
+        .filter(d => d.isDirectory())
+        .map(d => {
+          const projectPath = path.join(projectsDir, d.name)
+          const files = fs.readdirSync(projectPath)
+            .filter(f => f.endsWith('.jsonl'))
+            .map(f => {
+              const stat = fs.statSync(path.join(projectPath, f))
+              return { name: f, path: path.join(projectPath, f), size: stat.size, mtime: stat.mtime }
+            })
+            .sort((a, b) => b.mtime - a.mtime)
 
-            // Try to find cwd from early messages (system info usually at top)
-            for (let i = 0; i < Math.min(lines.length, 30); i++) {
-              try {
-                const msg = JSON.parse(lines[i])
-                if (msg.cwd) { cwd = msg.cwd; break }
-                if (msg.workspace) { cwd = msg.workspace; break }
-                const text = msg.message?.content || msg.content || ''
-                if (typeof text === 'string') {
-                  const match = text.match(/(?:cwd|working directory|project path)[\s:]+([^\n]+)/i)
-                  if (match) { cwd = match[1].trim(); break }
-                }
-              } catch { }
-            }
+          let preview = ''
+          let cwd = null
+          if (files.length > 0) {
+            try {
+              const content = fs.readFileSync(files[0].path, 'utf8')
+              const lines = content.split('\n').filter(Boolean)
 
-            const lastLine = lines[lines.length - 1]
-            if (lastLine) {
-              const msg = JSON.parse(lastLine)
-              preview = msg.message?.content || msg.content || ''
-              if (typeof preview === 'string' && preview.length > 80) preview = preview.slice(0, 80) + '...'
-            }
-          } catch { }
-        }
+              for (let i = 0; i < Math.min(lines.length, 30); i++) {
+                try {
+                  const msg = JSON.parse(lines[i])
+                  if (msg.cwd) { cwd = msg.cwd; break }
+                  if (msg.workspace) { cwd = msg.workspace; break }
+                  const text = msg.message?.content || msg.content || ''
+                  if (typeof text === 'string') {
+                    const match = text.match(/(?:cwd|working directory|project path)[\s:]+([^\n]+)/i)
+                    if (match) { cwd = match[1].trim(); break }
+                  }
+                } catch { }
+              }
 
-        return { name: d.name, path: projectPath, files, preview, lastTime: files[0]?.mtime || null, cwd }
+              const lastLine = lines[lines.length - 1]
+              if (lastLine) {
+                const msg = JSON.parse(lastLine)
+                preview = msg.message?.content || msg.content || ''
+                if (typeof preview === 'string' && preview.length > 80) preview = preview.slice(0, 80) + '...'
+              }
+            } catch { }
+          }
+
+          return {
+            name: d.name,
+            displayName: aliases[d.name] || '',
+            path: projectPath,
+            files,
+            preview,
+            lastTime: files[0]?.mtime || null,
+            cwd
+          }
+        })
+      projects = scanned
+    }
+
+    // 合并应用内创建的会话（还没有 transcript 的新建对话）
+    const projectCwds = new Set(projects.map(p => p.cwd).filter(Boolean))
+    for (const session of sessions) {
+      if (!session.cwd || projectCwds.has(session.cwd)) continue
+      const sessionName = session.name || path.basename(session.cwd)
+      projects.push({
+        name: sessionName,
+        displayName: aliases[sessionName] || '',
+        path: session.cwd,
+        files: [],
+        preview: '',
+        lastTime: session.lastAccessedAt ? new Date(session.lastAccessedAt) : (session.createdAt ? new Date(session.createdAt) : null),
+        cwd: session.cwd
       })
-      .sort((a, b) => (b.lastTime || 0) - (a.lastTime || 0))
+    }
+
+    projects.sort((a, b) => {
+      const ta = a.lastTime ? new Date(a.lastTime).getTime() : 0
+      const tb = b.lastTime ? new Date(b.lastTime).getTime() : 0
+      return tb - ta
+    })
 
     return { projects }
+  } catch (err) {
+    return { error: err.message }
+  }
+})
+
+ipcMain.handle('save-project-alias', async (event, { projectName, displayName }) => {
+  try {
+    const aliases = getAliases()
+    if (displayName && displayName.trim()) {
+      aliases[projectName] = displayName.trim()
+    } else {
+      delete aliases[projectName]
+    }
+    saveAliases(aliases)
+    return { success: true }
+  } catch (err) {
+    return { error: err.message }
+  }
+})
+
+ipcMain.handle('save-session', async (event, { cwd }) => {
+  try {
+    if (!cwd) return { error: 'No cwd provided' }
+    const sessions = getSessions()
+    const name = path.basename(cwd)
+    const existingIndex = sessions.findIndex(s => s.cwd === cwd)
+    const now = new Date().toISOString()
+
+    if (existingIndex >= 0) {
+      sessions[existingIndex].lastAccessedAt = now
+      sessions[existingIndex].name = name
+      const [existing] = sessions.splice(existingIndex, 1)
+      sessions.unshift(existing)
+    } else {
+      sessions.unshift({
+        id: `${name}-${Date.now()}`,
+        name,
+        cwd,
+        createdAt: now,
+        lastAccessedAt: now
+      })
+    }
+
+    if (sessions.length > 50) {
+      sessions.length = 50
+    }
+
+    saveSessions(sessions)
+    return { success: true }
   } catch (err) {
     return { error: err.message }
   }
@@ -648,10 +777,186 @@ ipcMain.handle('load-other-memory', async (event, memoryPath) => {
   }
 })
 
+// ===================== Build & Package =====================
+
+const APP_ROOT = path.join(__dirname, '..')
+const RELEASE_DIR = path.join(APP_ROOT, 'release', 'win-unpacked')
+
+function sendBuildOutput(win, data) {
+  if (win && !win.isDestroyed()) {
+    win.webContents.send('build-output', data)
+  }
+}
+
+function sendBuildDone(win, success, error) {
+  if (win && !win.isDestroyed()) {
+    win.webContents.send('build-done', { success, error })
+  }
+}
+
+ipcMain.handle('build-app', async (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender)
+  if (!win) return { error: 'No window found' }
+
+  // Step 1: npm run build
+  sendBuildOutput(win, { step: 'build', status: 'start', message: '开始构建前端...' })
+
+  const runBuild = () => new Promise((resolve, reject) => {
+    const proc = spawn('npm', ['run', 'build'], {
+      cwd: APP_ROOT,
+      shell: true,
+      env: { ...process.env, FORCE_COLOR: '0' }
+    })
+
+    let stdout = ''
+    let stderr = ''
+
+    proc.stdout.on('data', (data) => {
+      const text = data.toString()
+      stdout += text
+      sendBuildOutput(win, { step: 'build', status: 'running', message: text })
+    })
+
+    proc.stderr.on('data', (data) => {
+      const text = data.toString()
+      stderr += text
+      sendBuildOutput(win, { step: 'build', status: 'running', message: text })
+    })
+
+    proc.on('close', (code) => {
+      if (code === 0) {
+        resolve()
+      } else {
+        reject(new Error(`构建失败 (代码: ${code})\n${stderr || stdout}`))
+      }
+    })
+  })
+
+  // Step 2: npm run pack
+  const runPack = () => new Promise((resolve, reject) => {
+    sendBuildOutput(win, { step: 'pack', status: 'start', message: '开始打包 Electron 应用...' })
+
+    const proc = spawn('npm', ['run', 'pack'], {
+      cwd: APP_ROOT,
+      shell: true,
+      env: { ...process.env, FORCE_COLOR: '0' }
+    })
+
+    let stdout = ''
+    let stderr = ''
+
+    proc.stdout.on('data', (data) => {
+      const text = data.toString()
+      stdout += text
+      sendBuildOutput(win, { step: 'pack', status: 'running', message: text })
+    })
+
+    proc.stderr.on('data', (data) => {
+      const text = data.toString()
+      stderr += text
+      sendBuildOutput(win, { step: 'pack', status: 'running', message: text })
+    })
+
+    proc.on('close', (code) => {
+      if (code === 0) {
+        resolve()
+      } else {
+        reject(new Error(`打包失败 (代码: ${code})\n${stderr || stdout}`))
+      }
+    })
+  })
+
+  try {
+    await runBuild()
+    sendBuildOutput(win, { step: 'build', status: 'done', message: '前端构建完成 ✓' })
+    await runPack()
+    sendBuildOutput(win, { step: 'pack', status: 'done', message: '打包完成 ✓' })
+    sendBuildDone(win, true)
+    return { success: true }
+  } catch (err) {
+    sendBuildOutput(win, { step: 'error', status: 'failed', message: err.message })
+    sendBuildDone(win, false, err.message)
+    return { error: err.message }
+  }
+})
+
+ipcMain.handle('open-release-folder', async () => {
+  try {
+    await shell.openPath(RELEASE_DIR)
+    return { success: true }
+  } catch (err) {
+    return { error: err.message }
+  }
+})
+
 app.whenReady().then(createWindow)
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
+})
+
+// ===================== Auto Update =====================
+
+function sendUpdateEvent(channel, data) {
+  const wins = BrowserWindow.getAllWindows()
+  wins.forEach(win => {
+    if (!win.isDestroyed()) {
+      win.webContents.send(channel, data)
+    }
+  })
+}
+
+autoUpdater.on('checking-for-update', () => {
+  sendUpdateEvent('update-checking')
+})
+
+autoUpdater.on('update-available', (info) => {
+  sendUpdateEvent('update-available', { version: info.version, releaseNotes: info.releaseNotes })
+})
+
+autoUpdater.on('update-not-available', () => {
+  sendUpdateEvent('update-not-available')
+})
+
+autoUpdater.on('download-progress', (progressObj) => {
+  sendUpdateEvent('update-progress', {
+    percent: Math.round(progressObj.percent),
+    transferred: progressObj.transferred,
+    total: progressObj.total
+  })
+})
+
+autoUpdater.on('update-downloaded', (info) => {
+  sendUpdateEvent('update-downloaded', { version: info.version })
+})
+
+autoUpdater.on('error', (err) => {
+  sendUpdateEvent('update-error', { message: err.message })
+})
+
+ipcMain.handle('check-for-update', async () => {
+  try {
+    const result = await autoUpdater.checkForUpdates()
+    return { success: true, updateInfo: result?.updateInfo }
+  } catch (err) {
+    return { error: err.message }
+  }
+})
+
+ipcMain.handle('quit-and-install', async () => {
+  isQuitting = true
+  autoUpdater.quitAndInstall()
+  return { success: true }
+})
+
+// Check for updates shortly after app launch (not immediately, to avoid startup lag)
+app.whenReady().then(() => {
+  setTimeout(() => {
+    // Only auto-check in packaged app, not dev mode
+    if (app.isPackaged) {
+      autoUpdater.checkForUpdates().catch(() => {})
+    }
+  }, 5000)
 })
 
 app.on('activate', () => {

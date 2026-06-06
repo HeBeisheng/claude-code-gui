@@ -20,6 +20,7 @@ Claude Code 的 GUI 外壳应用。不是重新做 Claude Code，而是给命令
 - [x] 功能地图（PS 快捷键鼠标垫风格）
 - [x] 设置编辑器
 - [x] GitHub 仓库 + Release 发布
+- [x] **历史项目自定义别名**（新增，2026/6/5）
 - [ ] 用户反馈后 UI 微调
 - [ ] README 文档完善
 
@@ -91,6 +92,7 @@ npm run dist
 - [x] 记忆系统（退出弹窗、自动生成、加载其他项目记忆）
 - [x] GitHub 仓库创建
 - [x] GitHub Release 发布（v1.0.0）
+- [x] **历史项目自定义别名**（新增，2026/6/5）
 - [ ] 用户反馈后 UI 微调
 - [ ] README 文档完善
 
@@ -102,6 +104,8 @@ npm run dist
 - 用 `CLAUDE.md` + `.claude/memory.md` 双文件记忆机制
 - 退出时强制弹窗保存记忆
 - 项目路径从 `E:\claude code E\claude-code-manager` 移到 `E:\claude code E\程序员\claude-code-manager`
+- **自定义别名存储在 `~/.claude/project-aliases.json`，键为项目文件夹名，值为自定义显示名**
+- **双击项目名称进入编辑，回车保存，ESC 取消**
 
 ## 完整对话摘要
 
@@ -153,6 +157,24 @@ npm run dist
 - 项目文件夹移到 `E:\claude code E\程序员\claude-code-manager`
 - 创建了 `CLAUDE.md` 作为项目上下文
 
-### 结束
-用户确认新功能正常工作，满意退出。
+### 新增功能：历史项目自定义别名（2026/6/5）
+用户提出新需求：左侧历史项目列表里，每个项目不只是显示文件夹名字，还要支持自定义别名。显示方式改为两行：第一行是可编辑的自定义名字（双击进入编辑），第二行是文件夹路径（灰色小字）。
+
+确认了交互细节：
+- 单击项目项 → 继续对话（原有行为不变）
+- 双击项目名 → 进入编辑模式，显示输入框
+- 按回车或失去焦点 → 保存别名
+- 按 ESC → 取消编辑
+- 清空别名 → 恢复显示原始文件夹名
+
+代码修改：
+1. **electron/main.js**：添加 `getAliases()` / `saveAliases()` 辅助函数，从 `~/.claude/project-aliases.json` 读写别名；修改 `get-transcripts` handler 在返回 project 时带上 `displayName`；新增 `save-project-alias` handler。
+2. **electron/preload.js**：暴露 `saveProjectAlias` API。
+3. **src/App.jsx**：添加 `editingProject` 和 `editValue` state；修改侧边栏项目列表渲染逻辑，支持就地编辑；添加 `handleSaveAlias` 函数保存后刷新列表。
+4. **src/index.css**：添加 `.sidebar-item-input` 样式。
+
+用户成功运行了项目，并询问如何将修改后的应用更新到桌面的快捷方式。告知需要先 `npm run build` 再 `npm run pack`，新的可执行文件在 `release/win-unpacked/Claude Code Manager.exe`。
+
+**当前项目路径**：`E:\claude code E\程序员\claude-code-manager`
+**GitHub**：https://github.com/HeBeisheng/claude-code-gui
 <!-- DYNAMIC_MEMORY_END -->

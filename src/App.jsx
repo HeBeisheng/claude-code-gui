@@ -27,16 +27,44 @@ function App() {
   const [showQuitDialog, setShowQuitDialog] = useState(false)
   const [memoryContent, setMemoryContent] = useState('')
   const [isGeneratingMemory, setIsGeneratingMemory] = useState(false)
+  const [editingProject, setEditingProject] = useState(null)
+  const [editValue, setEditValue] = useState('')
+  const [updateState, setUpdateState] = useState({
+    available: false,
+    downloaded: false,
+    version: null,
+    progress: 0
+  })
 
   useEffect(() => {
     loadProjects()
 
     // Listen for quit confirmation from main process
-    const cleanup = window.electronAPI.onAskSaveMemory(() => {
+    const cleanupQuit = window.electronAPI.onAskSaveMemory(() => {
       setShowQuitDialog(true)
     })
 
-    return () => cleanup()
+    // Auto update listeners
+    const cleanupUpdateAvailable = window.electronAPI.onUpdateAvailable((data) => {
+      setUpdateState(prev => ({ ...prev, available: true, version: data?.version }))
+    })
+    const cleanupUpdateProgress = window.electronAPI.onUpdateProgress((data) => {
+      setUpdateState(prev => ({ ...prev, progress: data?.percent || 0 }))
+    })
+    const cleanupUpdateDownloaded = window.electronAPI.onUpdateDownloaded((data) => {
+      setUpdateState(prev => ({ ...prev, downloaded: true, version: data?.version }))
+    })
+    const cleanupUpdateError = window.electronAPI.onUpdateError(() => {
+      // Silently ignore auto-update errors (e.g. no network, not packaged)
+    })
+
+    return () => {
+      cleanupQuit()
+      cleanupUpdateAvailable()
+      cleanupUpdateProgress()
+      cleanupUpdateDownloaded()
+      cleanupUpdateError()
+    }
   }, [])
 
   const loadProjects = async () => {
@@ -52,6 +80,8 @@ function App() {
       setActiveCwd(result.path)
       setSelectedProjectName(null)
       setActiveView('terminal')
+      await window.electronAPI.saveSession({ cwd: result.path })
+      loadProjects()
     }
   }
 
@@ -61,6 +91,8 @@ function App() {
     if (project.cwd) {
       setActiveCwd(project.cwd)
       setActiveView('terminal')
+      await window.electronAPI.saveSession({ cwd: project.cwd })
+      loadProjects()
       return
     }
 
@@ -71,12 +103,21 @@ function App() {
     if (result.path) {
       setActiveCwd(result.path)
       setActiveView('terminal')
+      await window.electronAPI.saveSession({ cwd: result.path })
+      loadProjects()
     }
   }
 
   const handleSendCommand = (cmd) => {
     window.electronAPI.ptyWrite(cmd + '\r')
     setActiveView('terminal')
+  }
+
+  const handleSaveAlias = async (projectName, displayName) => {
+    setEditingProject(null)
+    setEditValue('')
+    await window.electronAPI.saveProjectAlias({ projectName, displayName })
+    loadProjects()
   }
 
   const handleStartClaude = () => {
@@ -100,6 +141,10 @@ function App() {
 
   const handleQuitCancel = () => {
     setShowQuitDialog(false)
+  }
+
+  const handleInstallUpdate = async () => {
+    await window.electronAPI.quitAndInstall()
   }
 
   return (
@@ -155,15 +200,92 @@ function App() {
               >
                 <div className="sidebar-item-icon">📁</div>
                 <div className="sidebar-item-info">
-                  <div className="sidebar-item-name">{project.name}</div>
-                  <div className="sidebar-item-meta">
-                    {timeAgo(project.lastTime)}
+                  {editingProject === project.name ? (
+                    <input
+                      autoFocus
+                      className="sidebar-item-input"
+                      value={editValue}
+                      onChange={(e) => setEditValue(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault()
+                          handleSaveAlias(project.name, editValue)
+                        } else if (e.key === 'Escape') {
+                          setEditingProject(null)
+                          setEditValue('')
+                        }
+                      }}
+                      onBlur={() => handleSaveAlias(project.name, editValue)}
+                      onClick={(e) => e.stopPropagation()}
+                    />
+                  ) : (
+                    <div
+                      className="sidebar-item-name"
+                      onDoubleClick={(e) => {
+                        e.stopPropagation()
+                        setEditingProject(project.name)
+                        setEditValue(project.displayName || project.name)
+                      }}
+                    >
+                      {project.displayName || project.name}
+                    </div>
+                  )}
+                  <div className="sidebar-item-meta" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
+                      {project.cwd || project.path}
+                    </span>
+                    {project.displayName && (
+                      <span style={{ color: '#444', flexShrink: 0 }}>{timeAgo(project.lastTime)}</span>
+                    )}
                   </div>
                 </div>
               </div>
             ))}
           </div>
         </div>
+
+        {updateState.available && (
+          <div style={{
+            padding: '10px 14px',
+            background: updateState.downloaded ? 'rgba(74, 222, 128, 0.08)' : 'rgba(212, 165, 116, 0.08)',
+            borderTop: `1px solid ${updateState.downloaded ? 'rgba(74, 222, 128, 0.15)' : 'rgba(212, 165, 116, 0.15)'}`,
+            fontSize: '12px',
+            color: updateState.downloaded ? '#4ade80' : '#d4a574'
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
+              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {updateState.downloaded
+                  ? `v${updateState.version} 已下载就绪`
+                  : `发现新版本 v${updateState.version}，正在下载... ${updateState.progress > 0 ? `${updateState.progress}%` : ''}`}
+              </span>
+              {updateState.downloaded && (
+                <button
+                  className="btn btn-primary"
+                  style={{ padding: '4px 10px', fontSize: '11px', flexShrink: 0 }}
+                  onClick={handleInstallUpdate}
+                >
+                  重启安装
+                </button>
+              )}
+            </div>
+            {!updateState.downloaded && updateState.progress > 0 && (
+              <div style={{
+                height: '2px',
+                background: 'rgba(212, 165, 116, 0.15)',
+                borderRadius: '1px',
+                marginTop: '8px',
+                overflow: 'hidden'
+              }}>
+                <div style={{
+                  height: '100%',
+                  width: `${updateState.progress}%`,
+                  background: '#d4a574',
+                  transition: 'width 0.3s ease'
+                }} />
+              </div>
+            )}
+          </div>
+        )}
 
         <div className="sidebar-footer">
           <div
@@ -216,7 +338,7 @@ function App() {
               <h1 className="panel-title">技能开关</h1>
               <button className="btn-back" onClick={() => setActiveView('terminal')}>← 返回终端</button>
             </div>
-            <SkillsPanel />
+            <SkillsPanel cwd={activeCwd} />
           </div>
         )}
 

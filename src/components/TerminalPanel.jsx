@@ -122,7 +122,8 @@ function TerminalPanel({ cwd, command, onReady }) {
       resizeObserver.disconnect()
       cleanupData()
       cleanupExit()
-      window.electronAPI.ptyKill()
+      // 不在这里调用 ptyKill()：ptyCreate() 在创建新终端前会主动杀掉旧 PTY。
+      // 如果在 cleanup 中异步调用 ptyKill，可能因竞态误杀新创建的终端。
       term.dispose()
     }
   }, [cwd]) // Re-init when cwd changes

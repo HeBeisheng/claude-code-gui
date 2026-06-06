@@ -1,10 +1,15 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 
 function SettingsPanel() {
   const [settings, setSettings] = useState({})
   const [activeScope, setActiveScope] = useState('globalLocal')
   const [jsonText, setJsonText] = useState('')
   const [saveStatus, setSaveStatus] = useState('')
+  const [isBuilding, setIsBuilding] = useState(false)
+  const [buildLogs, setBuildLogs] = useState([])
+  const [buildDone, setBuildDone] = useState(false)
+  const [buildSuccess, setBuildSuccess] = useState(false)
+  const logEndRef = useRef(null)
 
   useEffect(() => {
     if (window.electronAPI) {
@@ -22,6 +27,31 @@ function SettingsPanel() {
     setSaveStatus('')
   }, [activeScope])
 
+  useEffect(() => {
+    if (!window.electronAPI) return
+    const cleanupOutput = window.electronAPI.onBuildOutput((data) => {
+      setBuildLogs(prev => [...prev, data])
+    })
+    const cleanupDone = window.electronAPI.onBuildDone(({ success, error }) => {
+      setIsBuilding(false)
+      setBuildDone(true)
+      setBuildSuccess(success)
+      if (error) {
+        setBuildLogs(prev => [...prev, { step: 'error', status: 'failed', message: error }])
+      }
+    })
+    return () => {
+      cleanupOutput()
+      cleanupDone()
+    }
+  }, [])
+
+  useEffect(() => {
+    if (logEndRef.current) {
+      logEndRef.current.scrollIntoView({ behavior: 'smooth' })
+    }
+  }, [buildLogs])
+
   const handleSave = async () => {
     try {
       const data = JSON.parse(jsonText)
@@ -35,6 +65,24 @@ function SettingsPanel() {
     } catch (err) {
       setSaveStatus('JSON 格式错误')
     }
+  }
+
+  const handleBuild = async () => {
+    setIsBuilding(true)
+    setBuildDone(false)
+    setBuildSuccess(false)
+    setBuildLogs([{ step: 'init', status: 'start', message: '开始打包流程...' }])
+    const result = await window.electronAPI.buildApp()
+    if (result.error && !buildDone) {
+      setIsBuilding(false)
+      setBuildDone(true)
+      setBuildSuccess(false)
+      setBuildLogs(prev => [...prev, { step: 'error', status: 'failed', message: result.error }])
+    }
+  }
+
+  const handleOpenRelease = async () => {
+    await window.electronAPI.openReleaseFolder()
   }
 
   const scopes = [
@@ -97,6 +145,63 @@ function SettingsPanel() {
           onChange={e => { setJsonText(e.target.value); setSaveStatus('') }}
           spellCheck={false}
         />
+      </div>
+
+      <div className="card" style={{ background: 'rgba(212, 165, 116, 0.03)', borderColor: 'rgba(212, 165, 116, 0.2)' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+          <div className="card-title" style={{ margin: 0 }}>重新打包应用</div>
+          <div style={{ display: 'flex', gap: '10px' }}>
+            {buildDone && buildSuccess && (
+              <button className="btn btn-secondary" onClick={handleOpenRelease}>打开 release 文件夹</button>
+            )}
+            <button
+              className="btn btn-primary"
+              onClick={handleBuild}
+              disabled={isBuilding}
+            >
+              {isBuilding ? '打包中...' : '重新打包'}
+            </button>
+          </div>
+        </div>
+        <p style={{ fontSize: '13px', color: '#666', marginBottom: '12px' }}>
+          点击后会依次执行 <code>npm run build</code> → <code>npm run pack</code>，生成最新的桌面应用。
+        </p>
+        {(isBuilding || buildDone) && (
+          <div
+            style={{
+              background: '#0a0a0a',
+              border: '1px solid #1c1c1c',
+              borderRadius: '8px',
+              padding: '12px 16px',
+              fontSize: '12px',
+              fontFamily: "'Cascadia Code', 'Consolas', monospace",
+              color: '#888',
+              maxHeight: '240px',
+              overflowY: 'auto',
+              whiteSpace: 'pre-wrap',
+              lineHeight: '1.6'
+            }}
+          >
+            {buildLogs.map((log, i) => (
+              <div key={i} style={{
+                color: log.step === 'error' ? '#f87171' : log.step === 'done' ? '#4ade80' : '#888'
+              }}>
+                {log.message}
+              </div>
+            ))}
+            <div ref={logEndRef} />
+          </div>
+        )}
+        {buildDone && (
+          <div style={{
+            marginTop: '12px',
+            fontSize: '13px',
+            fontWeight: 500,
+            color: buildSuccess ? '#4ade80' : '#f87171'
+          }}>
+            {buildSuccess ? '打包完成！点击上方按钮打开 release 文件夹。' : '打包失败，请查看上方日志。'}
+          </div>
+        )}
       </div>
 
       <div className="card">

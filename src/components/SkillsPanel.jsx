@@ -1,22 +1,22 @@
 import React, { useEffect, useState } from 'react'
 
-function SkillsPanel() {
+function SkillsPanel({ cwd }) {
   const [skills, setSkills] = useState({ user: { enabled: [], disabled: [] }, project: { enabled: [], disabled: [] } })
   const [loading, setLoading] = useState(true)
 
   const loadSkills = async () => {
     setLoading(true)
-    const data = await window.electronAPI.getSkills()
+    const data = await window.electronAPI.getSkills({ cwd })
     setSkills(data)
     setLoading(false)
   }
 
   useEffect(() => {
     loadSkills()
-  }, [])
+  }, [cwd])
 
   const handleToggle = async (scope, name, enable) => {
-    const result = await window.electronAPI.toggleSkill({ scope, name, enable })
+    const result = await window.electronAPI.toggleSkill({ scope, name, enable, cwd })
     if (result.error) {
       alert('操作失败: ' + result.error)
       return
