@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron')
+const { app, BrowserWindow, ipcMain, dialog, shell, Menu } = require('electron')
 const path = require('path')
 const fs = require('fs')
 const os = require('os')
@@ -24,18 +24,29 @@ function getSettingsPath(local = false) {
 }
 
 function createWindow() {
+  const isWin = process.platform === 'win32'
+  const iconPath = path.join(__dirname, '..', 'build', isWin ? 'icon.ico' : 'icon.png')
+
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
     minWidth: 1000,
     minHeight: 700,
-    titleBarStyle: 'hiddenInset',
+    frame: false,
+    icon: iconPath,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false
     }
   })
+
+  // Explicitly set icon on Windows for better taskbar support
+  if (isWin && fs.existsSync(iconPath)) {
+    mainWindow.setIcon(iconPath)
+  }
+
+  Menu.setApplicationMenu(null)
 
   const isDev = !app.isPackaged
   const distFile = path.join(__dirname, '../dist/index.html')
@@ -127,7 +138,7 @@ ipcMain.handle('pty-create', async (event, { cwd, shell } = {}) => {
     ptyProcess.onData((data) => {
       // 只有当前窗口的活跃 PTY 仍是本进程时才发送数据，避免旧 PTY 的数据干扰新终端
       if (ptyProcesses.get(win.id) === ptyProcess && !win.isDestroyed()) {
-        win.webContents.send('pty-data', data)
+        win.webContents.send('pty-data', { data, pid: ptyProcess.pid })
       }
     })
 
@@ -136,7 +147,7 @@ ipcMain.handle('pty-create', async (event, { cwd, shell } = {}) => {
       // 防止旧 PTY 被替换后的退出事件误杀新终端
       if (ptyProcesses.get(win.id) === ptyProcess) {
         if (!win.isDestroyed()) {
-          win.webContents.send('pty-exit', { exitCode, signal })
+          win.webContents.send('pty-exit', { exitCode, signal, pid: ptyProcess.pid })
         }
         ptyProcesses.delete(win.id)
       }
@@ -180,6 +191,35 @@ ipcMain.handle('pty-kill', async (event) => {
     ptyProcesses.delete(win.id)
   }
   return { success: true }
+})
+
+// ===================== Permission Mode =====================
+
+ipcMain.handle('get-permission-mode', async () => {
+  try {
+    const settingsPath = path.join(CLAUDE_DIR, 'settings.json')
+    if (!fs.existsSync(settingsPath)) return { mode: 'default' }
+    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'))
+    return { mode: settings.permissions?.defaultMode || 'default' }
+  } catch (err) {
+    return { mode: 'default' }
+  }
+})
+
+ipcMain.handle('set-permission-mode', async (event, { mode }) => {
+  try {
+    const settingsPath = path.join(CLAUDE_DIR, 'settings.json')
+    let settings = {}
+    if (fs.existsSync(settingsPath)) {
+      settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'))
+    }
+    if (!settings.permissions) settings.permissions = {}
+    settings.permissions.defaultMode = mode
+    fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf8')
+    return { success: true }
+  } catch (err) {
+    return { error: err.message }
+  }
 })
 
 // ===================== Existing IPC =====================
@@ -294,11 +334,97 @@ ipcMain.handle('toggle-skill', async (event, { scope, name, enable, cwd }) => {
   }
 })
 
-ipcMain.handle('get-mcp-servers', async () => {
+ipcMain.handle('get-skill-content', async (event, { skillPath }) => {
   try {
-    const mcpJsonPath = path.join(process.cwd(), '.mcp.json')
-    const mcpJson = fs.existsSync(mcpJsonPath) ? JSON.parse(fs.readFileSync(mcpJsonPath, 'utf8')) : null
-    return { mcpJson }
+    if (!skillPath || !fs.existsSync(skillPath)) return { content: '' }
+    const files = fs.readdirSync(skillPath)
+    const mdFile = files.find(f => f.endsWith('.md'))
+    if (!mdFile) return { content: '' }
+    let content = fs.readFileSync(path.join(skillPath, mdFile), 'utf8')
+    // Strip YAML frontmatter if present
+    content = content.replace(/^---\s*\n[\s\S]*?\n---\s*\n?/, '').trim()
+    return { content }
+  } catch (err) {
+    return { error: err.message }
+  }
+})
+
+ipcMain.handle('get-mcp-servers', async (event, { cwd } = {}) => {
+  try {
+    const projectMcpPath = cwd ? path.join(cwd, '.mcp.json') : null
+    const globalMcpPath = path.join(CLAUDE_DIR, 'mcp.json')
+    const settingsPath = path.join(CLAUDE_DIR, 'settings.json')
+
+    let mcpJson = null
+    let source = 'none'
+
+    if (projectMcpPath && fs.existsSync(projectMcpPath)) {
+      mcpJson = JSON.parse(fs.readFileSync(projectMcpPath, 'utf8'))
+      source = 'project'
+    } else if (fs.existsSync(globalMcpPath)) {
+      mcpJson = JSON.parse(fs.readFileSync(globalMcpPath, 'utf8'))
+      source = 'global'
+    }
+
+    let enabledServers = []
+    if (fs.existsSync(settingsPath)) {
+      const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'))
+      enabledServers = settings.enabledMcpjsonServers || []
+    }
+
+    return { mcpJson, enabledServers, source, paths: { project: projectMcpPath, global: globalMcpPath } }
+  } catch (err) {
+    return { error: err.message }
+  }
+})
+
+ipcMain.handle('get-builtin-mcp-server', async () => {
+  try {
+    const serverPath = path.join(__dirname, '..', 'mcp-servers', 'desktop-control', 'index.js')
+    const exists = fs.existsSync(serverPath)
+    return { path: serverPath, exists }
+  } catch (err) {
+    return { error: err.message }
+  }
+})
+
+ipcMain.handle('save-mcp-config', async (event, { scope, data, cwd }) => {
+  try {
+    let targetPath
+    if (scope === 'project' && cwd) {
+      targetPath = path.join(cwd, '.mcp.json')
+    } else {
+      targetPath = path.join(CLAUDE_DIR, 'mcp.json')
+    }
+
+    const dir = path.dirname(targetPath)
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(targetPath, JSON.stringify(data, null, 2), 'utf8')
+    return { success: true, path: targetPath }
+  } catch (err) {
+    return { error: err.message }
+  }
+})
+
+ipcMain.handle('toggle-mcp-server', async (event, { name, enable }) => {
+  try {
+    const settingsPath = path.join(CLAUDE_DIR, 'settings.json')
+    let settings = {}
+    if (fs.existsSync(settingsPath)) {
+      settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'))
+    }
+    if (!settings.enabledMcpjsonServers) settings.enabledMcpjsonServers = []
+
+    if (enable) {
+      if (!settings.enabledMcpjsonServers.includes(name)) {
+        settings.enabledMcpjsonServers.push(name)
+      }
+    } else {
+      settings.enabledMcpjsonServers = settings.enabledMcpjsonServers.filter(s => s !== name)
+    }
+
+    fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf8')
+    return { success: true }
   } catch (err) {
     return { error: err.message }
   }
@@ -306,6 +432,7 @@ ipcMain.handle('get-mcp-servers', async () => {
 
 const ALIASES_PATH = path.join(CLAUDE_DIR, 'project-aliases.json')
 const SESSIONS_PATH = path.join(CLAUDE_DIR, 'ccm-sessions.json')
+const PROJECT_ORDER_PATH = path.join(CLAUDE_DIR, 'ccm-project-order.json')
 
 function getAliases() {
   try {
@@ -313,6 +440,24 @@ function getAliases() {
     return JSON.parse(fs.readFileSync(ALIASES_PATH, 'utf8'))
   } catch {
     return {}
+  }
+}
+
+function getProjectOrder() {
+  try {
+    if (!fs.existsSync(PROJECT_ORDER_PATH)) return []
+    return JSON.parse(fs.readFileSync(PROJECT_ORDER_PATH, 'utf8'))
+  } catch {
+    return []
+  }
+}
+
+function saveProjectOrder(order) {
+  try {
+    fs.writeFileSync(PROJECT_ORDER_PATH, JSON.stringify(order, null, 2), 'utf8')
+    return true
+  } catch {
+    return false
   }
 }
 
@@ -406,19 +551,26 @@ ipcMain.handle('get-transcripts', async () => {
       projects = scanned
     }
 
-    // 合并应用内创建的会话（还没有 transcript 的新建对话）
-    const projectCwds = new Set(projects.map(p => p.cwd).filter(Boolean))
+    // 合并应用内创建的会话（新建对话和分支对话）
+    const projectNames = new Set(projects.map(p => p.name))
+    const projectCwdSet = new Set(projects.map(p => p.cwd).filter(Boolean))
     for (const session of sessions) {
-      if (!session.cwd || projectCwds.has(session.cwd)) continue
-      const sessionName = session.name || path.basename(session.cwd)
+      if (!session.cwd) continue
+      // 使用 session.id 作为唯一 name，避免冲突
+      if (projectNames.has(session.id)) continue
+      // 非分支会话如果 cwd 已存在于扫描项目，则跳过（避免重复显示同一项目）
+      if (!session.displayName && projectCwdSet.has(session.cwd)) continue
+      projectNames.add(session.id)
       projects.push({
-        name: sessionName,
-        displayName: aliases[sessionName] || '',
+        name: session.id,
+        displayName: session.displayName || aliases[session.name] || session.name,
         path: session.cwd,
         files: [],
         preview: '',
         lastTime: session.lastAccessedAt ? new Date(session.lastAccessedAt) : (session.createdAt ? new Date(session.createdAt) : null),
-        cwd: session.cwd
+        cwd: session.cwd,
+        isSession: true,
+        isCasual: !!session.isCasual
       })
     }
 
@@ -429,6 +581,24 @@ ipcMain.handle('get-transcripts', async () => {
     })
 
     return { projects }
+  } catch (err) {
+    return { error: err.message }
+  }
+})
+
+ipcMain.handle('get-project-order', async () => {
+  try {
+    const order = getProjectOrder()
+    return { order }
+  } catch (err) {
+    return { order: [] }
+  }
+})
+
+ipcMain.handle('save-project-order', async (event, { order }) => {
+  try {
+    saveProjectOrder(order)
+    return { success: true }
   } catch (err) {
     return { error: err.message }
   }
@@ -449,27 +619,28 @@ ipcMain.handle('save-project-alias', async (event, { projectName, displayName })
   }
 })
 
-ipcMain.handle('save-session', async (event, { cwd }) => {
+ipcMain.handle('save-session', async (event, { cwd, displayName, id: providedId, isCasual }) => {
   try {
     if (!cwd) return { error: 'No cwd provided' }
     const sessions = getSessions()
     const name = path.basename(cwd)
-    const existingIndex = sessions.findIndex(s => s.cwd === cwd)
     const now = new Date().toISOString()
+    const id = providedId || `${name}-${Date.now()}`
 
-    if (existingIndex >= 0) {
-      sessions[existingIndex].lastAccessedAt = now
-      sessions[existingIndex].name = name
-      const [existing] = sessions.splice(existingIndex, 1)
-      sessions.unshift(existing)
+    if (displayName) {
+      // Branch/fork: always create a new session entry
+      sessions.unshift({ id, name, displayName, cwd, createdAt: now, lastAccessedAt: now, isCasual: !!isCasual })
     } else {
-      sessions.unshift({
-        id: `${name}-${Date.now()}`,
-        name,
-        cwd,
-        createdAt: now,
-        lastAccessedAt: now
-      })
+      const existingIndex = sessions.findIndex(s => s.cwd === cwd && !s.displayName)
+      if (existingIndex >= 0) {
+        sessions[existingIndex].lastAccessedAt = now
+        sessions[existingIndex].name = name
+        if (isCasual !== undefined) sessions[existingIndex].isCasual = !!isCasual
+        const [existing] = sessions.splice(existingIndex, 1)
+        sessions.unshift(existing)
+      } else {
+        sessions.unshift({ id, name, cwd, createdAt: now, lastAccessedAt: now, isCasual: !!isCasual })
+      }
     }
 
     if (sessions.length > 50) {
@@ -477,7 +648,7 @@ ipcMain.handle('save-session', async (event, { cwd }) => {
     }
 
     saveSessions(sessions)
-    return { success: true }
+    return { success: true, id }
   } catch (err) {
     return { error: err.message }
   }
@@ -895,7 +1066,34 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
 })
 
-// ===================== Auto Update =====================
+ipcMain.handle('toggle-fullscreen', async (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender)
+  if (win && !win.isDestroyed()) {
+    win.setFullScreen(!win.isFullScreen())
+  }
+  return { success: true, isFullScreen: win ? win.isFullScreen() : false }
+})
+
+ipcMain.handle('toggle-devtools', async (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender)
+  if (win && !win.isDestroyed()) {
+    if (win.webContents.isDevToolsOpened()) {
+      win.webContents.closeDevTools()
+    } else {
+      win.webContents.openDevTools()
+    }
+  }
+  return { success: true }
+})
+
+ipcMain.handle('open-external', async (event, url) => {
+  try {
+    await shell.openExternal(url)
+    return { success: true }
+  } catch (err) {
+    return { error: err.message }
+  }
+})
 
 function sendUpdateEvent(channel, data) {
   const wins = BrowserWindow.getAllWindows()
@@ -947,6 +1145,40 @@ ipcMain.handle('quit-and-install', async () => {
   isQuitting = true
   autoUpdater.quitAndInstall()
   return { success: true }
+})
+
+// ===================== Window Controls =====================
+
+ipcMain.handle('window-minimize', async () => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.minimize()
+  }
+  return { success: true }
+})
+
+ipcMain.handle('window-maximize', async () => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isMaximized()) {
+      mainWindow.unmaximize()
+    } else {
+      mainWindow.maximize()
+    }
+  }
+  return { success: true, isMaximized: mainWindow ? mainWindow.isMaximized() : false }
+})
+
+ipcMain.handle('window-close', async () => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.close()
+  }
+  return { success: true }
+})
+
+ipcMain.handle('is-window-maximized', async () => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    return { isMaximized: mainWindow.isMaximized() }
+  }
+  return { isMaximized: false }
 })
 
 // Check for updates shortly after app launch (not immediately, to avoid startup lag)

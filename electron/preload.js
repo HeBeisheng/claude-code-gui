@@ -5,17 +5,27 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getSettings: () => ipcRenderer.invoke('get-settings'),
   saveSettings: (payload) => ipcRenderer.invoke('save-settings', payload),
 
+  // Permission Mode
+  getPermissionMode: () => ipcRenderer.invoke('get-permission-mode'),
+  setPermissionMode: (payload) => ipcRenderer.invoke('set-permission-mode', payload),
+
   // Skills
   getSkills: (payload) => ipcRenderer.invoke('get-skills', payload),
+  getSkillContent: (payload) => ipcRenderer.invoke('get-skill-content', payload),
   toggleSkill: (payload) => ipcRenderer.invoke('toggle-skill', payload),
 
   // MCP
-  getMcpServers: () => ipcRenderer.invoke('get-mcp-servers'),
+  getMcpServers: (payload) => ipcRenderer.invoke('get-mcp-servers', payload),
+  saveMcpConfig: (payload) => ipcRenderer.invoke('save-mcp-config', payload),
+  toggleMcpServer: (payload) => ipcRenderer.invoke('toggle-mcp-server', payload),
+  getBuiltinMcpServer: () => ipcRenderer.invoke('get-builtin-mcp-server'),
 
   // Transcripts / History
   getTranscripts: () => ipcRenderer.invoke('get-transcripts'),
   getTranscriptContent: (filePath) => ipcRenderer.invoke('get-transcript-content', filePath),
   saveProjectAlias: (payload) => ipcRenderer.invoke('save-project-alias', payload),
+  getProjectOrder: () => ipcRenderer.invoke('get-project-order'),
+  saveProjectOrder: (payload) => ipcRenderer.invoke('save-project-order', payload),
   saveSession: (payload) => ipcRenderer.invoke('save-session', payload),
 
   // Directory
@@ -70,12 +80,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // PTY Events
   onPtyData: (callback) => {
-    const handler = (event, data) => callback(data)
+    const handler = (event, payload) => callback(payload)
     ipcRenderer.on('pty-data', handler)
     return () => ipcRenderer.removeListener('pty-data', handler)
   },
   onPtyExit: (callback) => {
-    const handler = (event, data) => callback(data)
+    const handler = (event, payload) => callback(payload)
     ipcRenderer.on('pty-exit', handler)
     return () => ipcRenderer.removeListener('pty-exit', handler)
   },
@@ -93,5 +103,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const handler = () => callback()
     ipcRenderer.on('ask-save-memory', handler)
     return () => ipcRenderer.removeListener('ask-save-memory', handler)
-  }
+  },
+
+  // Window Controls
+  windowMinimize: () => ipcRenderer.invoke('window-minimize'),
+  windowMaximize: () => ipcRenderer.invoke('window-maximize'),
+  windowClose: () => ipcRenderer.invoke('window-close'),
+  isWindowMaximized: () => ipcRenderer.invoke('is-window-maximized'),
+  openExternal: (url) => ipcRenderer.invoke('open-external', url),
+  toggleDevTools: () => ipcRenderer.invoke('toggle-devtools'),
+  toggleFullscreen: () => ipcRenderer.invoke('toggle-fullscreen')
 })
