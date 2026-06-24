@@ -71,6 +71,15 @@ function TerminalPanel({ cwd, command, onReady, onPtyExit: onPtyExitProp, onClau
     terminalRef.current = term
     fitAddonRef.current = fitAddon
 
+    // 有选区时 Ctrl+C 复制到剪贴板，不发给 shell；没选区时正常中断
+    term.attachCustomKeyEventHandler((e) => {
+      if (e.ctrlKey && e.key === 'c' && term.hasSelection()) {
+        navigator.clipboard.writeText(term.getSelection())
+        return false
+      }
+      return true
+    })
+
     // Handle PTY data -> terminal (filter by pid to avoid cross-talk between multiple panels)
     const cleanupData = window.electronAPI.onPtyData((payload) => {
       if (payload.pid === currentPtyPid.current) {
@@ -183,6 +192,9 @@ function TerminalPanel({ cwd, command, onReady, onPtyExit: onPtyExitProp, onClau
       if (result.error) {
         setStatus('错误: ' + result.error)
         terminalRef.current.write(`\r\n\x1b[31m启动终端失败: ${result.error}\x1b[0m\r\n`)
+        if (cwd) {
+          terminalRef.current.write(`\x1b[31m尝试目录: ${cwd}\x1b[0m\r\n`)
+        }
         return
       }
 

@@ -46,7 +46,22 @@ function createWindow() {
     mainWindow.setIcon(iconPath)
   }
 
-  Menu.setApplicationMenu(null)
+  // 设置最小应用菜单以保留标准编辑快捷键（复制/粘贴/全选等）
+  const menuTemplate = [
+    {
+      label: '编辑',
+      submenu: [
+        { role: 'undo', label: '撤销' },
+        { role: 'redo', label: '重做' },
+        { type: 'separator' },
+        { role: 'cut', label: '剪切' },
+        { role: 'copy', label: '复制' },
+        { role: 'paste', label: '粘贴' },
+        { role: 'selectAll', label: '全选' }
+      ]
+    }
+  ]
+  Menu.setApplicationMenu(Menu.buildFromTemplate(menuTemplate))
 
   const isDev = !app.isPackaged
   const distFile = path.join(__dirname, '../dist/index.html')
@@ -122,7 +137,18 @@ ipcMain.handle('pty-create', async (event, { cwd, shell } = {}) => {
 
   const isWin = process.platform === 'win32'
   const shellPath = shell || (isWin ? 'powershell.exe' : process.env.SHELL || 'bash')
-  const ptyCwd = cwd || os.homedir()
+  let ptyCwd = cwd || os.homedir()
+
+  // 如果传入的 cwd 不是有效目录，回退到用户主目录避免 Error 267
+  if (cwd) {
+    try {
+      if (!fs.statSync(cwd).isDirectory()) {
+        ptyCwd = os.homedir()
+      }
+    } catch {
+      ptyCwd = os.homedir()
+    }
+  }
 
   try {
     const ptyProcess = pty.spawn(shellPath, [], {
@@ -134,6 +160,15 @@ ipcMain.handle('pty-create', async (event, { cwd, shell } = {}) => {
     })
 
     ptyProcesses.set(win.id, ptyProcess)
+
+    // 如果 cwd 被回退了，在 shell 启动后提示用户
+    if (cwd && ptyCwd !== cwd) {
+      setTimeout(() => {
+        if (ptyProcesses.get(win.id) === ptyProcess && !win.isDestroyed()) {
+          ptyProcess.write(`\r\n\x1b[33m[Claude Code Manager] 原工作目录已不存在 (${cwd})，已回退到主目录。\x1b[0m\r\n`)
+        }
+      }, 500)
+    }
 
     ptyProcess.onData((data) => {
       // 只有当前窗口的活跃 PTY 仍是本进程时才发送数据，避免旧 PTY 的数据干扰新终端
