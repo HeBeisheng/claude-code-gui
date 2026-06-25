@@ -48,6 +48,7 @@ function App() {
   const [evictDialog, setEvictDialog] = useState(null)
   const [isSavingMemory, setIsSavingMemory] = useState(false)
   const [claudeStartedMap, setClaudeStartedMap] = useState({})
+  const [contextMenu, setContextMenu] = useState(null)
   const prevTerminalsRef = useRef({})
   const searchRef = useRef(null)
 
@@ -157,6 +158,14 @@ function App() {
     document.addEventListener('mousedown', handleClickOutside)
     return () => document.removeEventListener('mousedown', handleClickOutside)
   }, [])
+
+  // Close context menu on click anywhere
+  useEffect(() => {
+    if (!contextMenu) return
+    const handleClick = () => setContextMenu(null)
+    document.addEventListener('click', handleClick)
+    return () => document.removeEventListener('click', handleClick)
+  }, [contextMenu])
 
   const handleNewChat = async () => {
     setIsLoading(true)
@@ -289,6 +298,32 @@ function App() {
     loadProjects()
   }
 
+  const handleContextMenu = (e, project) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setContextMenu({ x: e.clientX, y: e.clientY, project })
+  }
+
+  const handlePinProject = async (projectName) => {
+    const newOrder = [projectName, ...projectOrder.filter(n => n !== projectName)]
+    setProjectOrder(newOrder)
+    setProjects(prev => applyProjectOrder(prev, newOrder))
+    await window.electronAPI.saveProjectOrder({ order: newOrder })
+    setContextMenu(null)
+  }
+
+  const handleHideProject = async (projectName) => {
+    await window.electronAPI.hideProject({ projectName })
+    loadProjects()
+    setContextMenu(null)
+  }
+
+  const handleEditAliasFromMenu = (project) => {
+    setEditingProject(project.name)
+    setEditValue(project.displayName || project.name)
+    setContextMenu(null)
+  }
+
   const toggleExpandProject = (projectName) => {
     setExpandedProjects(prev => ({ ...prev, [projectName]: !prev[projectName] }))
   }
@@ -335,6 +370,7 @@ function App() {
             className={`sidebar-item ${selectedProjectName === project.name ? 'active' : ''}`}
             title={project.cwd || project.path}
             draggable
+            onContextMenu={(e) => handleContextMenu(e, project)}
             onDragStart={(e) => {
               e.dataTransfer.setData('text/plain', project.name)
               e.currentTarget.style.opacity = '0.5'
@@ -859,6 +895,31 @@ function App() {
         )}
       </div>
       </div>
+
+      {/* Context Menu */}
+      {contextMenu && (
+        <div
+          className="context-menu"
+          style={{
+            position: 'fixed',
+            left: contextMenu.x,
+            top: contextMenu.y,
+            zIndex: 10000
+          }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="context-menu-item" onClick={() => handlePinProject(contextMenu.project.name)}>
+            <span>📌</span> 置顶
+          </div>
+          <div className="context-menu-item" onClick={() => handleEditAliasFromMenu(contextMenu.project)}>
+            <span>✏️</span> 编辑别名
+          </div>
+          <div className="context-menu-separator" />
+          <div className="context-menu-item danger" onClick={() => handleHideProject(contextMenu.project.name)}>
+            <span>🗑️</span> 从列表移除
+          </div>
+        </div>
+      )}
     </div>
   )
 }

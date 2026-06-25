@@ -468,6 +468,7 @@ ipcMain.handle('toggle-mcp-server', async (event, { name, enable }) => {
 const ALIASES_PATH = path.join(CLAUDE_DIR, 'project-aliases.json')
 const SESSIONS_PATH = path.join(CLAUDE_DIR, 'ccm-sessions.json')
 const PROJECT_ORDER_PATH = path.join(CLAUDE_DIR, 'ccm-project-order.json')
+const HIDDEN_PROJECTS_PATH = path.join(CLAUDE_DIR, 'ccm-hidden-projects.json')
 
 function getAliases() {
   try {
@@ -490,6 +491,24 @@ function getProjectOrder() {
 function saveProjectOrder(order) {
   try {
     fs.writeFileSync(PROJECT_ORDER_PATH, JSON.stringify(order, null, 2), 'utf8')
+    return true
+  } catch {
+    return false
+  }
+}
+
+function getHiddenProjects() {
+  try {
+    if (!fs.existsSync(HIDDEN_PROJECTS_PATH)) return []
+    return JSON.parse(fs.readFileSync(HIDDEN_PROJECTS_PATH, 'utf8'))
+  } catch {
+    return []
+  }
+}
+
+function saveHiddenProjects(list) {
+  try {
+    fs.writeFileSync(HIDDEN_PROJECTS_PATH, JSON.stringify(list, null, 2), 'utf8')
     return true
   } catch {
     return false
@@ -528,6 +547,7 @@ ipcMain.handle('get-transcripts', async () => {
     const projectsDir = path.join(CLAUDE_DIR, 'projects')
     const aliases = getAliases()
     const sessions = getSessions()
+    const hidden = getHiddenProjects()
 
     let projects = []
 
@@ -609,6 +629,10 @@ ipcMain.handle('get-transcripts', async () => {
       })
     }
 
+    // 过滤掉已隐藏的项目
+    const hiddenSet = new Set(hidden)
+    projects = projects.filter(p => !hiddenSet.has(p.name))
+
     projects.sort((a, b) => {
       const ta = a.lastTime ? new Date(a.lastTime).getTime() : 0
       const tb = b.lastTime ? new Date(b.lastTime).getTime() : 0
@@ -649,6 +673,82 @@ ipcMain.handle('save-project-alias', async (event, { projectName, displayName })
     }
     saveAliases(aliases)
     return { success: true }
+  } catch (err) {
+    return { error: err.message }
+  }
+})
+
+ipcMain.handle('hide-project', async (event, { projectName }) => {
+  try {
+    const hidden = getHiddenProjects()
+    if (!hidden.includes(projectName)) {
+      hidden.push(projectName)
+      saveHiddenProjects(hidden)
+    }
+    return { success: true }
+  } catch (err) {
+    return { error: err.message }
+  }
+})
+
+ipcMain.handle('unhide-project', async (event, { projectName }) => {
+  try {
+    let hidden = getHiddenProjects()
+    hidden = hidden.filter(n => n !== projectName)
+    saveHiddenProjects(hidden)
+    return { success: true }
+  } catch (err) {
+    return { error: err.message }
+  }
+})
+
+ipcMain.handle('get-hidden-projects', async () => {
+  try {
+    const hidden = getHiddenProjects()
+    const aliases = getAliases()
+    const projectsDir = path.join(CLAUDE_DIR, 'projects')
+    const sessions = getSessions()
+
+    const details = hidden.map(name => {
+      // Try to find display info from sessions
+      const session = sessions.find(s => s.id === name)
+      if (session) {
+        return {
+          name,
+          displayName: session.displayName || aliases[session.name] || session.name,
+          cwd: session.cwd,
+          isSession: true
+        }
+      }
+      // Try to find from scanned projects
+      const alias = aliases[name]
+      const projectPath = path.join(projectsDir, name)
+      let cwd = null
+      if (fs.existsSync(projectPath)) {
+        try {
+          const files = fs.readdirSync(projectPath).filter(f => f.endsWith('.jsonl'))
+          if (files.length > 0) {
+            const content = fs.readFileSync(path.join(projectPath, files[0]), 'utf8')
+            const lines = content.split('\n').filter(Boolean)
+            for (let i = 0; i < Math.min(lines.length, 30); i++) {
+              try {
+                const msg = JSON.parse(lines[i])
+                if (msg.cwd) { cwd = msg.cwd; break }
+                if (msg.workspace) { cwd = msg.workspace; break }
+              } catch { }
+            }
+          }
+        } catch { }
+      }
+      return {
+        name,
+        displayName: alias || name,
+        cwd,
+        isSession: false
+      }
+    })
+
+    return { hidden: details }
   } catch (err) {
     return { error: err.message }
   }

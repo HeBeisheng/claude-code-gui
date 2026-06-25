@@ -27,6 +27,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getProjectOrder: () => ipcRenderer.invoke('get-project-order'),
   saveProjectOrder: (payload) => ipcRenderer.invoke('save-project-order', payload),
   saveSession: (payload) => ipcRenderer.invoke('save-session', payload),
+  hideProject: (payload) => ipcRenderer.invoke('hide-project', payload),
+  unhideProject: (payload) => ipcRenderer.invoke('unhide-project', payload),
+  getHiddenProjects: () => ipcRenderer.invoke('get-hidden-projects'),
 
   // Directory
   selectDirectory: () => ipcRenderer.invoke('select-directory'),

@@ -9,6 +9,7 @@ function SettingsPanel() {
   const [buildLogs, setBuildLogs] = useState([])
   const [buildDone, setBuildDone] = useState(false)
   const [buildSuccess, setBuildSuccess] = useState(false)
+  const [hiddenProjects, setHiddenProjects] = useState([])
   const logEndRef = useRef(null)
 
   useEffect(() => {
@@ -18,6 +19,7 @@ function SettingsPanel() {
         const initial = data[activeScope]
         setJsonText(initial ? JSON.stringify(initial, null, 2) : '{}')
       })
+      loadHiddenProjects()
     }
   }, [])
 
@@ -83,6 +85,16 @@ function SettingsPanel() {
 
   const handleOpenRelease = async () => {
     await window.electronAPI.openReleaseFolder()
+  }
+
+  const loadHiddenProjects = async () => {
+    const data = await window.electronAPI.getHiddenProjects()
+    setHiddenProjects(data.hidden || [])
+  }
+
+  const handleUnhideProject = async (projectName) => {
+    await window.electronAPI.unhideProject({ projectName })
+    loadHiddenProjects()
   }
 
   const scopes = [
@@ -200,6 +212,45 @@ function SettingsPanel() {
             color: buildSuccess ? '#4ade80' : '#f87171'
           }}>
             {buildSuccess ? '打包完成！点击上方按钮打开 release 文件夹。' : '打包失败，请查看上方日志。'}
+          </div>
+        )}
+      </div>
+
+      <div className="card" style={{ background: 'rgba(248, 113, 113, 0.03)', borderColor: 'rgba(248, 113, 113, 0.15)' }}>
+        <div className="card-title" style={{ color: '#fca5a5' }}>已隐藏的项目</div>
+        <p style={{ fontSize: '13px', color: '#666', marginBottom: '12px' }}>
+          以下项目被从侧边栏列表中移除，但原始对话数据仍保留在 ~/.claude/projects/ 中。恢复后它们会重新出现在列表里。
+        </p>
+        {hiddenProjects.length === 0 ? (
+          <div style={{ fontSize: '13px', color: '#555', padding: '8px 0' }}>暂无隐藏的项目</div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+            {hiddenProjects.map(p => (
+              <div
+                key={p.name}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  padding: '8px 10px',
+                  background: 'rgba(255, 255, 255, 0.03)',
+                  borderRadius: '8px',
+                  border: '1px solid rgba(255, 255, 255, 0.04)'
+                }}
+              >
+                <div style={{ minWidth: 0, overflow: 'hidden' }}>
+                  <div style={{ fontSize: '13px', color: '#ccc', fontWeight: 500 }}>{p.displayName || p.name}</div>
+                  {p.cwd && <div style={{ fontSize: '11px', color: '#555', marginTop: '2px' }}>{p.cwd}</div>}
+                </div>
+                <button
+                  className="btn btn-secondary"
+                  style={{ padding: '4px 10px', fontSize: '11px', flexShrink: 0, marginLeft: '10px' }}
+                  onClick={() => handleUnhideProject(p.name)}
+                >
+                  恢复显示
+                </button>
+              </div>
+            ))}
           </div>
         )}
       </div>
